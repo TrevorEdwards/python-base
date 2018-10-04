@@ -34,7 +34,9 @@ BEARER_TOKEN_FORMAT = "Bearer %s"
 
 EXPIRY_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # should be less than kube_config.EXPIRY_SKEW_PREVENTION_DELAY
-EXPIRY_TIMEDELTA = 2
+PAST_EXPIRY_TIMEDELTA = 2
+# should be more than kube_config.EXPIRY_SKEW_PREVENTION_DELAY
+FUTURE_EXPIRY_TIMEDELTA = 60
 
 NON_EXISTING_FILE = "zz_non_existing_file_472398324"
 
@@ -73,8 +75,10 @@ TEST_USERNAME = "me"
 TEST_PASSWORD = "pass"
 # token for me:pass
 TEST_BASIC_TOKEN = "Basic bWU6cGFzcw=="
-TEST_TOKEN_EXPIRY = _format_expiry_datetime(
-    datetime.datetime.utcnow() - datetime.timedelta(minutes=EXPIRY_TIMEDELTA))
+DATETIME_EXPIRY_PAST = datetime.datetime.utcnow() - datetime.timedelta(minutes=PAST_EXPIRY_TIMEDELTA)
+DATETIME_EXPIRY_FUTURE = datetime.datetime.utcnow() + datetime.timedelta(minutes=FUTURE_EXPIRY_TIMEDELTA)
+TEST_TOKEN_EXPIRY_PAST = _format_expiry_datetime(DATETIME_EXPIRY_PAST)
+TEST_TOKEN_EXPIRY_FUTURE = _format_expiry_datetime(DATETIME_EXPIRY_FUTURE)
 
 TEST_SSL_HOST = "https://test-host"
 TEST_CERTIFICATE_AUTH = "cert-auth"
@@ -495,6 +499,7 @@ class TestKubeConfigLoader(BaseTestCase):
                         "name": "gcp",
                         "config": {
                             "access-token": TEST_DATA_BASE64,
+                            "expiry": TEST_TOKEN_EXPIRY_FUTURE,
                         }
                     },
                     "token": TEST_DATA_BASE64,  # should be ignored
@@ -509,7 +514,7 @@ class TestKubeConfigLoader(BaseTestCase):
                         "name": "gcp",
                         "config": {
                             "access-token": TEST_DATA_BASE64,
-                            "expiry": TEST_TOKEN_EXPIRY,  # always in past
+                            "expiry": TEST_TOKEN_EXPIRY_PAST,  # always in past
                         }
                     },
                     "token": TEST_DATA_BASE64,  # should be ignored
@@ -654,7 +659,7 @@ class TestKubeConfigLoader(BaseTestCase):
     def test_load_gcp_token_with_refresh(self):
         def cred(): return None
         cred.token = TEST_ANOTHER_DATA_BASE64
-        cred.expiry = datetime.datetime.now()
+        cred.expiry = datetime.datetime.utcnow()
 
         loader = KubeConfigLoader(
             config_dict=self.TEST_KUBE_CONFIG,
@@ -667,6 +672,40 @@ class TestKubeConfigLoader(BaseTestCase):
         self.assertTrue(new_expiry > original_expiry)
         self.assertEqual(BEARER_TOKEN_FORMAT % TEST_ANOTHER_DATA_BASE64,
                          loader.token)
+
+    def test_load_gcp_token_with_refresh_dict_get(self):
+        class nonlocal:
+            accessed = False
+
+        class cred_old:
+            token = TEST_DATA_BASE64
+            expiry = DATETIME_EXPIRY_PAST
+
+        class cred_new:
+            token = TEST_ANOTHER_DATA_BASE64
+            expiry = DATETIME_EXPIRY_FUTURE
+        actual = FakeConfig()
+
+        def get_google_credentials():
+            if nonlocal.accessed:
+                return cred_new
+            nonlocal.accessed = True
+            return cred_old
+
+        loader = KubeConfigLoader(
+            config_dict=self.TEST_KUBE_CONFIG,
+            active_context="expired_gcp",
+            get_google_credentials=get_google_credentials)
+        loader.load_and_set(actual)
+        original_expiry = _get_expiry(loader)
+        token = actual.api_key['authorization']
+        new_expiry = _get_expiry(loader)
+        # assert that the configs expiry actually updates
+        self.assertTrue(new_expiry > original_expiry)
+        self.assertEqual(BEARER_TOKEN_FORMAT % TEST_ANOTHER_DATA_BASE64,
+                         loader.token)
+        self.assertEqual(BEARER_TOKEN_FORMAT % TEST_ANOTHER_DATA_BASE64,
+                         token)
 
     def test_oidc_no_refresh(self):
         loader = KubeConfigLoader(

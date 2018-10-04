@@ -14,6 +14,7 @@
 
 import atexit
 import base64
+import collections
 import datetime
 import json
 import logging
@@ -126,6 +127,35 @@ class FileOrData(object):
         return self._data
 
 
+class GcpTokenApiKeyDict(collections.MutableMapping):
+    """Custom dict which allows GCP auth tokens to be refreshed."""
+
+    def __init__(self, copy_target, kube_config, provider):
+        self._dict = dict.copy(copy_target)
+        self.kube_config = kube_config
+        self.provider = provider
+
+    def __getitem__(self, key):
+        if key == 'authorization':
+            return self.kube_config.load_gcp_token(self.provider)
+        return self._dict[key]
+
+    def __setitem__(self, key, value):
+        self._dict[key] = value
+
+    def __delitem__(self, key):
+        del self._dict[key]
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __len__(self):
+        return len(self._dict)
+
+    def __keytransform__(self, key):
+        return key
+
+
 class KubeConfigLoader(object):
 
     def __init__(self, config_dict, active_context=None,
@@ -200,7 +230,7 @@ class KubeConfigLoader(object):
         if 'name' not in provider:
             return
         if provider['name'] == 'gcp':
-            return self._load_gcp_token(provider)
+            return self.load_gcp_token(provider)
         if provider['name'] == 'azure':
             return self._load_azure_token(provider)
         if provider['name'] == 'oidc':
@@ -234,7 +264,7 @@ class KubeConfigLoader(object):
         if self._config_persister:
             self._config_persister(self._config.value)
 
-    def _load_gcp_token(self, provider):
+    def load_gcp_token(self, provider):
         if (('config' not in provider) or
                 ('access-token' not in provider['config']) or
                 ('expiry' in provider['config'] and
@@ -394,7 +424,14 @@ class KubeConfigLoader(object):
 
     def _set_config(self, client_configuration):
         if 'token' in self.__dict__:
-            client_configuration.api_key['authorization'] = self.token
+            if 'auth-provider' in self._user and 'name' in self._user['auth-provider'] and self._user['auth-provider']['name'] == 'gcp':
+                # GCP authorization tokens must be regularly refreshed.
+                gcp_dict = GcpTokenApiKeyDict(client_configuration.api_key, self, self._user['auth-provider'])
+                client_configuration.api_key = gcp_dict
+                # for tests only.
+                client_configuration.api_key['authorization'] = self.token
+            else:
+                client_configuration.api_key['authorization'] = self.token
         # copy these keys directly from self to configuration object
         keys = ['host', 'ssl_ca_cert', 'cert_file', 'key_file', 'verify_ssl']
         for key in keys:
